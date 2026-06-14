@@ -1,0 +1,10 @@
+title       = "catfacts"
+baseURL     = "https://catfacts-cli.tamnd.com/"
+description = "A command line for CatFact Ninja."
+contentDir  = "content"
+outputDir   = "public"
+theme       = "tago-doks"
+syntaxHighlight = "true"
+
+[params]
+github = "https://github.com/tamnd/catfacts-cli"
