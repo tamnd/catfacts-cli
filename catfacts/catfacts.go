@@ -1,5 +1,5 @@
 // Package catfacts is the library behind the catfacts command line:
-// the HTTP client, request shaping, and the typed data models for catfacts.
+// the HTTP client, request shaping, and the typed data models for catfact.ninja.
 //
 // The Client here is the spine every command shares. It sets a real
 // User-Agent, paces requests so a busy session stays polite, and retries the
@@ -9,27 +9,25 @@ package catfacts
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
-	"strings"
 	"time"
 )
 
-// DefaultUserAgent identifies the client to catfacts. A real, honest
+// DefaultUserAgent identifies the client to catfact.ninja. A real, honest
 // User-Agent is both polite and the thing most likely to keep you unblocked.
 const DefaultUserAgent = "catfacts/dev (+https://github.com/tamnd/catfacts-cli)"
 
 // Host is the site this client talks to, and the host the URI driver in
-// domain.go claims. The scaffold points it at catfacts.com; change it once you
-// know the real endpoints you want to read.
-const Host = "catfacts.com"
+// domain.go claims.
+const Host = "catfact.ninja"
 
 // BaseURL is the root every request is built from.
 const BaseURL = "https://" + Host
 
-// Client talks to catfacts over HTTP.
+// Client talks to catfact.ninja over HTTP.
 type Client struct {
 	HTTP      *http.Client
 	UserAgent string
@@ -123,78 +121,68 @@ func backoff(attempt int) time.Duration {
 	return d
 }
 
-// Page is the scaffold's one example record: a single page, addressed by the
-// path that names it on catfacts.com. It is a stand-in for the typed records you
-// will model from the real catfacts endpoints. The kit struct tags make it
-// addressable as a resource URI (see domain.go): ID is the URI id, and Body is
-// the long text `catfacts cat` and the Markdown export print.
-type Page struct {
-	ID    string `json:"id" kit:"id"`
-	URL   string `json:"url"`
-	Title string `json:"title,omitempty"`
-	Body  string `json:"body,omitempty" kit:"body"`
+// Fact is a single cat fact returned by the /fact and /facts endpoints.
+type Fact struct {
+	Fact   string `kit:"id" json:"fact"`
+	Length int    `json:"length"`
 }
 
-// GetPage fetches one page by its path (for example "wiki/Go") and returns it as
-// a record. The scaffold keeps a plain-text preview of the response as the body;
-// replace the parsing with the real fields once you know the endpoint's shape.
-func (c *Client) GetPage(ctx context.Context, path string) (*Page, error) {
-	path = strings.Trim(path, "/")
-	url := BaseURL + "/" + path
+// Breed is a cat breed returned by the /breeds endpoint.
+type Breed struct {
+	Breed   string `kit:"id" json:"breed"`
+	Country string `json:"country"`
+	Origin  string `json:"origin"`
+	Coat    string `json:"coat"`
+	Pattern string `json:"pattern"`
+}
+
+// paginatedFacts is the wire shape of /facts.
+type paginatedFacts struct {
+	Data []Fact `json:"data"`
+}
+
+// paginatedBreeds is the wire shape of /breeds.
+type paginatedBreeds struct {
+	Data []Breed `json:"data"`
+}
+
+// GetFact fetches a single random cat fact.
+func (c *Client) GetFact(ctx context.Context) (*Fact, error) {
+	body, err := c.Get(ctx, BaseURL+"/fact")
+	if err != nil {
+		return nil, err
+	}
+	var f Fact
+	if err := json.Unmarshal(body, &f); err != nil {
+		return nil, fmt.Errorf("decode fact: %w", err)
+	}
+	return &f, nil
+}
+
+// GetFacts fetches up to limit cat facts from the /facts endpoint.
+func (c *Client) GetFacts(ctx context.Context, limit int) ([]Fact, error) {
+	url := fmt.Sprintf("%s/facts?limit=%d", BaseURL, limit)
 	body, err := c.Get(ctx, url)
 	if err != nil {
 		return nil, err
 	}
-	return &Page{ID: path, URL: url, Title: path, Body: pageText(body)}, nil
+	var p paginatedFacts
+	if err := json.Unmarshal(body, &p); err != nil {
+		return nil, fmt.Errorf("decode facts: %w", err)
+	}
+	return p.Data, nil
 }
 
-// PageLinks fetches a page and returns the same-host pages it links to, as page
-// stubs. It shows the member-listing pattern the URI driver relies on: every
-// stub carries enough (an id and a URL) to be addressed and followed on its own.
-func (c *Client) PageLinks(ctx context.Context, path string, limit int) ([]*Page, error) {
-	path = strings.Trim(path, "/")
-	body, err := c.Get(ctx, BaseURL+"/"+path)
+// GetBreeds fetches up to limit cat breeds from the /breeds endpoint.
+func (c *Client) GetBreeds(ctx context.Context, limit int) ([]Breed, error) {
+	url := fmt.Sprintf("%s/breeds?limit=%d", BaseURL, limit)
+	body, err := c.Get(ctx, url)
 	if err != nil {
 		return nil, err
 	}
-	var out []*Page
-	seen := map[string]bool{}
-	for _, p := range linkPaths(body) {
-		if seen[p] {
-			continue
-		}
-		seen[p] = true
-		out = append(out, &Page{ID: p, URL: BaseURL + "/" + p})
-		if limit > 0 && len(out) >= limit {
-			break
-		}
+	var p paginatedBreeds
+	if err := json.Unmarshal(body, &p); err != nil {
+		return nil, fmt.Errorf("decode breeds: %w", err)
 	}
-	return out, nil
-}
-
-var (
-	hrefRE = regexp.MustCompile(`href="(/[^":#?]+)"`)
-	tagRE  = regexp.MustCompile(`<[^>]+>`)
-)
-
-// linkPaths pulls the relative link targets out of an HTML response, so a list
-// op can turn each into an addressable page stub.
-func linkPaths(body []byte) []string {
-	var out []string
-	for _, m := range hrefRE.FindAllSubmatch(body, -1) {
-		if p := strings.Trim(string(m[1]), "/"); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-// pageText reduces an HTML response to a short plain-text preview, a stand-in
-// for the typed extract a real endpoint would hand you.
-func pageText(body []byte) string {
-	s := strings.Join(strings.Fields(tagRE.ReplaceAllString(string(body), " ")), " ")
-	if len(s) > 500 {
-		s = s[:500]
-	}
-	return s
+	return p.Data, nil
 }

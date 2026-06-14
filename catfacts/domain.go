@@ -2,8 +2,7 @@ package catfacts
 
 import (
 	"context"
-	"net/url"
-	"strings"
+	"fmt"
 
 	"github.com/tamnd/any-cli/kit"
 	"github.com/tamnd/any-cli/kit/errs"
@@ -19,9 +18,6 @@ import (
 // catfacts:// URIs by routing to the operations Register installs. The same
 // Domain also builds the standalone catfacts binary (see cli.NewApp), so the
 // binary and a host share one source of truth.
-//
-// This is the scaffold's starting point: one resource type, "page", served by a
-// resolver op and a list op. Add your real types here as you model the site.
 func init() { kit.Register(Domain{}) }
 
 // Domain is the catfacts driver. It carries no state; the per-run client is
@@ -39,7 +35,7 @@ func (Domain) Info() kit.DomainInfo {
 			Short:  "A command line for CatFact Ninja.",
 			Long: `A command line for CatFact Ninja.
 
-catfacts reads public catfacts data over plain HTTPS, shapes it into
+catfacts reads public catfact.ninja data over plain HTTPS, shapes it into
 clean records, and prints output that pipes into the rest of your tools. No API
 key, nothing to run alongside it.`,
 			Site: Host,
@@ -48,24 +44,21 @@ key, nothing to run alongside it.`,
 	}
 }
 
-// Register installs the client factory and every operation onto app. A resolver
-// op (Single) names its own record type and answers `ant get`; a List op
-// enumerates a parent resource's members and answers `ant ls`.
+// Register installs the client factory and every operation onto app.
 func (Domain) Register(app *kit.App) {
 	app.SetClient(newClient)
 
-	// Resolver op: one record per id, the home of `catfacts page` and
-	// `ant get catfacts://page/<id>`.
-	kit.Handle(app, kit.OpMeta{Name: "page", Group: "read", Single: true,
-		Summary: "Fetch a page by path or URL", URIType: "page", Resolver: true,
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, getPage)
+	// fact: fetch a single random cat fact.
+	kit.Handle(app, kit.OpMeta{Name: "fact", Group: "read", Single: true,
+		Summary: "Fetch a random cat fact", URIType: "fact", Resolver: true}, getFact)
 
-	// List op: members of a page, the home of `catfacts links` and `ant ls`.
-	// It emits page stubs, so every listed member is itself an addressable
-	// catfacts://page/ URI a host can follow.
-	kit.Handle(app, kit.OpMeta{Name: "links", Group: "read", List: true,
-		Summary: "List the pages a page links to", URIType: "page",
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, listLinks)
+	// facts: fetch multiple cat facts.
+	kit.Handle(app, kit.OpMeta{Name: "facts", Group: "read", List: true,
+		Summary: "List cat facts", URIType: "fact"}, getFacts)
+
+	// breeds: fetch cat breeds.
+	kit.Handle(app, kit.OpMeta{Name: "breeds", Group: "read", List: true,
+		Summary: "List cat breeds", URIType: "breed"}, getBreeds)
 }
 
 // newClient builds the client from the host-resolved config, so a host and the
@@ -88,40 +81,51 @@ func newClient(_ context.Context, cfg kit.Config) (any, error) {
 }
 
 // --- inputs ---
-//
-// Each handler takes a typed input struct. kit fills the fields from the tags:
-// kit:"arg" is a positional argument, kit:"flag,inherit" binds the framework's
-// shared flag of the same name, and kit:"inject" receives the client newClient
-// builds.
 
-type pageRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
+type factInput struct {
 	Client *Client `kit:"inject"`
 }
 
-type listRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
-	Limit  int     `kit:"flag,inherit" help:"max results"`
+type factsInput struct {
+	Limit  int     `kit:"flag,inherit" help:"max facts" default:"10"`
+	Client *Client `kit:"inject"`
+}
+
+type breedsInput struct {
+	Limit  int     `kit:"flag,inherit" help:"max breeds" default:"20"`
 	Client *Client `kit:"inject"`
 }
 
 // --- handlers ---
 
-func getPage(ctx context.Context, in pageRef, emit func(*Page) error) error {
-	p, err := in.Client.GetPage(ctx, pagePath(in.Ref))
+func getFact(ctx context.Context, in factInput, emit func(*Fact) error) error {
+	f, err := in.Client.GetFact(ctx)
 	if err != nil {
 		return mapErr(err)
 	}
-	return emit(p)
+	return emit(f)
 }
 
-func listLinks(ctx context.Context, in listRef, emit func(*Page) error) error {
-	pages, err := in.Client.PageLinks(ctx, pagePath(in.Ref), in.Limit)
+func getFacts(ctx context.Context, in factsInput, emit func(*Fact) error) error {
+	facts, err := in.Client.GetFacts(ctx, in.Limit)
 	if err != nil {
 		return mapErr(err)
 	}
-	for _, p := range pages {
-		if err := emit(p); err != nil {
+	for i := range facts {
+		if err := emit(&facts[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func getBreeds(ctx context.Context, in breedsInput, emit func(*Breed) error) error {
+	breeds, err := in.Client.GetBreeds(ctx, in.Limit)
+	if err != nil {
+		return mapErr(err)
+	}
+	for i := range breeds {
+		if err := emit(&breeds[i]); err != nil {
 			return err
 		}
 	}
@@ -130,44 +134,29 @@ func listLinks(ctx context.Context, in listRef, emit func(*Page) error) error {
 
 // --- Resolver: the URI-native string functions, pure and network-free ---
 
-// Classify turns any accepted input — a bare path or a full catfacts.com URL —
-// into the canonical (type, id), so `ant resolve` and `ant url` touch no network.
+// Classify turns any accepted input into the canonical (type, id).
+// For catfact.ninja there is no meaningful id, so everything maps to "fact".
 func (Domain) Classify(input string) (uriType, id string, err error) {
-	id = pagePath(input)
-	if id == "" {
-		return "", "", errs.Usage("unrecognized catfacts reference: %q", input)
+	if input == "" {
+		return "", "", errs.Usage("empty catfacts reference")
 	}
-	return "page", id, nil
+	return "fact", input, nil
 }
 
 // Locate is the inverse: the live https URL for a (type, id).
 func (Domain) Locate(uriType, id string) (string, error) {
-	if uriType != "page" {
+	switch uriType {
+	case "fact":
+		return fmt.Sprintf("%s/fact", BaseURL), nil
+	case "breed":
+		return fmt.Sprintf("%s/breeds", BaseURL), nil
+	default:
 		return "", errs.Usage("catfacts has no resource type %q", uriType)
 	}
-	return BaseURL + "/" + strings.Trim(id, "/"), nil
 }
 
-// --- helpers ---
-
-// pagePath turns any accepted input into the canonical page id: the path of a
-// full URL on this host, or a bare path with its slashes trimmed.
-func pagePath(input string) string {
-	input = strings.TrimSpace(input)
-	if u, err := url.Parse(input); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
-		return strings.Trim(u.Path, "/")
-	}
-	return strings.Trim(input, "/")
-}
-
-// mapErr converts a library error into the kit error kind that carries the right
-// exit code, so a host renders the same outcomes the standalone binary does. As
-// you add sentinel errors to the library, map them here, for example:
-//
-//	case errors.Is(err, ErrNotFound):
-//		return errs.NotFound("%s", err.Error())
-//	case errors.Is(err, ErrRateLimited):
-//		return errs.RateLimited("%s", err.Error())
+// mapErr converts a library error into the kit error kind that carries the
+// right exit code.
 func mapErr(err error) error {
 	return err
 }
